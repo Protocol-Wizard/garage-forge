@@ -61,6 +61,29 @@ ROLE_PLAYER = "Player"
 ROLE_SHOP_MANAGER = "Shop Manager"
 ROLE_ADMIN = "Administrator"
 
+# Car purchase prices. The existing Skyline is the starter car;
+# the Toyota Supra MK4 is an additional car that can be purchased.
+CAR_PRICES = {
+    "Skyline GT-R R34": Decimal("0.00"),
+    "Supra MK4": Decimal("45000.00"),
+    "Lexus LFA": Decimal("150000.00"),
+    "Lancer Evolution IX": Decimal("55000.00"),
+    "Honda NSX": Decimal("75000.00"),
+    "RX-7": Decimal("40000.00"),
+}
+
+# Optional per-model base images. If a model image is not present,
+# the application falls back to assets/car/base.png.
+MODEL_ASSET_DIRS = {
+    "Skyline GT-R R34": "r34",
+    "Supra MK4": "supra",
+}
+
+MODEL_ASSETS = {
+    "Skyline GT-R R34": ["base.png"],
+    "Supra MK4": ["supra_base.png", "base.png"],
+}
+
 
 # ============================================================
 # HELPERS
@@ -3772,6 +3795,316 @@ class ManagementDialog(QDialog):
 
 
 # ============================================================
+# VEHICLE SHOP / MY CARS
+# ============================================================
+
+class VehicleShopDialog(QDialog):
+
+    def __init__(self, db, user, current_vehicle_id, parent=None):
+
+        super().__init__(parent)
+
+        self.db = db
+        self.user = user
+        self.current_vehicle_id = current_vehicle_id
+        self.selected_vehicle_id = None
+
+        self.setWindowTitle("My Cars / Car Shop")
+        self.resize(900, 600)
+
+        self.setStyleSheet(
+            """
+            QDialog { background:#09070d; color:#e8edf2; }
+            QLabel { color:#e8edf2; background:transparent; }
+            QLabel#title { color:#c4b5fd; font-size:20px; font-weight:bold; }
+            QLabel#money { color:#c4b5fd; font-size:14px; font-weight:bold; }
+            QListWidget { background:#121019; border:1px solid #30263d; border-radius:10px; }
+            QListWidget::item { padding:12px; border-bottom:1px solid #2a2333; }
+            QListWidget::item:selected { background:#211a2d; }
+            QPushButton {
+                background:#251d31; color:white; border:1px solid #68517f;
+                border-radius:8px; padding:9px 15px; font-weight:bold;
+            }
+            QPushButton:hover { background:#4a3860; }
+            QPushButton#buy { background:#8b5cf6; border-color:#c4b5fd; }
+            QPushButton#buy:hover { background:#a78bfa; }
+            QPushButton:disabled { background:#211c29; color:#81778d; border-color:#40354d; }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(12)
+
+        title = QLabel("MY CARS / CAR SHOP")
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        self.money_label = QLabel()
+        self.money_label.setObjectName("money")
+        layout.addWidget(self.money_label)
+
+        hint = QLabel(
+            "Select a car you own to switch to it, or purchase another model. "
+            "Each purchased car gets its own customization and installed parts."
+        )
+        hint.setStyleSheet("color:#9f98a8;font-size:12px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.list = QListWidget()
+        layout.addWidget(self.list, 1)
+
+        buttons = QHBoxLayout()
+        self.select_button = QPushButton("SELECT CAR")
+        self.select_button.clicked.connect(self.select_car)
+        buttons.addWidget(self.select_button)
+
+        self.buy_button = QPushButton("BUY CAR")
+        self.buy_button.setObjectName("buy")
+        self.buy_button.clicked.connect(self.buy_car)
+        buttons.addWidget(self.buy_button)
+
+        close = QPushButton("CLOSE")
+        close.clicked.connect(self.reject)
+        buttons.addWidget(close)
+
+        layout.addLayout(buttons)
+
+        self.load_cars()
+        self.list.currentRowChanged.connect(self.update_buttons)
+        self.update_buttons()
+
+    def load_cars(self):
+
+        self.list.clear()
+
+        if not self.user.get("user_id"):
+            self.money_label.setText("Guest accounts cannot buy cars.")
+            return
+
+        user_id = self.user["user_id"]
+        self.money_label.setText(f"Money: {money(self.user.get('money', 0))}")
+
+        models = self.db.query(
+            """
+            SELECT
+                cm.model_id,
+                cm.model_name,
+                m.manufacturer_name,
+                cm.model_year,
+                cm.base_hp,
+                cm.base_weight,
+                cm.base_top_speed,
+                cm.base_acceleration
+            FROM car_models cm
+            JOIN manufacturers m ON m.manufacturer_id = cm.manufacturer_id
+            ORDER BY cm.model_id
+            """
+        )
+
+        owned = self.db.query(
+            """
+            SELECT
+                v.vehicle_id,
+                v.model_id,
+                v.nickname,
+                cm.model_name
+            FROM vehicles v
+            JOIN car_models cm ON cm.model_id = v.model_id
+            WHERE v.user_id = %s
+            ORDER BY v.vehicle_id
+            """,
+            (user_id,)
+        )
+
+        owned_by_model = {}
+        for vehicle in owned:
+            owned_by_model.setdefault(int(vehicle["model_id"]), []).append(vehicle)
+
+        for model in models:
+            model_id = int(model["model_id"])
+            price = CAR_PRICES.get(model["model_name"], Decimal("50000.00"))
+            vehicles = owned_by_model.get(model_id, [])
+
+            if vehicles:
+                ownership = "OWNED: " + ", ".join(
+                    v["nickname"] or model["model_name"] for v in vehicles
+                )
+            else:
+                ownership = "Not owned"
+
+            price_text = "STARTER / FREE" if price == 0 else money(price)
+
+            item = QListWidgetItem(
+                f"{model['manufacturer_name']} {model['model_name']} ({model['model_year']})\n"
+                f"Price: {price_text}  •  {ownership}\n"
+                f"Base: {model['base_hp']} HP  •  {model['base_weight']} kg  •  "
+                f"{model['base_top_speed']} km/h  •  Accel {model['base_acceleration']}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, model_id)
+            item.setData(Qt.ItemDataRole.UserRole + 1, vehicles)
+            item.setData(Qt.ItemDataRole.UserRole + 2, price)
+            self.list.addItem(item)
+
+    def update_buttons(self):
+
+        item = self.list.currentItem()
+        if item is None or not self.user.get("user_id"):
+            self.select_button.setEnabled(False)
+            self.buy_button.setEnabled(False)
+            return
+
+        vehicles = item.data(Qt.ItemDataRole.UserRole + 1) or []
+        price = item.data(Qt.ItemDataRole.UserRole + 2) or Decimal("0")
+
+        self.select_button.setEnabled(bool(vehicles))
+        self.buy_button.setEnabled(price > 0)
+
+        if price > 0:
+            self.buy_button.setText(f"BUY — {money(price)}")
+        else:
+            self.buy_button.setText("STARTER CAR")
+            self.buy_button.setEnabled(False)
+
+    def selected_model_data(self):
+        item = self.list.currentItem()
+        if item is None:
+            return None, [], Decimal("0")
+        return (
+            int(item.data(Qt.ItemDataRole.UserRole)),
+            item.data(Qt.ItemDataRole.UserRole + 1) or [],
+            item.data(Qt.ItemDataRole.UserRole + 2) or Decimal("0")
+        )
+
+    def select_car(self):
+
+        model_id, vehicles, _ = self.selected_model_data()
+        if not vehicles:
+            return
+
+        # If a model has multiple copies, choose the first one here.
+        # The UI can later be extended with individual vehicle selection.
+        vehicle = vehicles[0]
+        self.selected_vehicle_id = int(vehicle["vehicle_id"])
+        self.accept()
+
+    def buy_car(self):
+
+        model_id, vehicles, price = self.selected_model_data()
+        if model_id is None or price <= 0:
+            return
+
+        user_id = self.user["user_id"]
+        cursor = None
+
+        try:
+            self.db.ensure_connection()
+            self.db.conn.autocommit = False
+            self.db.conn.start_transaction()
+            cursor = self.db.conn.cursor(dictionary=True)
+
+            cursor.execute(
+                "SELECT money FROM users WHERE user_id = %s FOR UPDATE",
+                (user_id,)
+            )
+            user_row = cursor.fetchone()
+            if not user_row:
+                raise RuntimeError("Player account was not found.")
+
+            current_money = Decimal(str(user_row["money"] or 0))
+            if current_money < price:
+                raise RuntimeError(
+                    f"Not enough money.\\n\\n"
+                    f"Your money: {money(current_money)}\\n"
+                    f"Car price: {money(price)}"
+                )
+
+            cursor.execute(
+                """
+                SELECT model_name
+                FROM car_models
+                WHERE model_id = %s
+                FOR UPDATE
+                """,
+                (model_id,)
+            )
+            model = cursor.fetchone()
+            if not model:
+                raise RuntimeError("Selected car model was not found.")
+
+            cursor.execute(
+                """
+                UPDATE users
+                SET money = money - %s
+                WHERE user_id = %s
+                """,
+                (price, user_id)
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO vehicles (user_id, model_id, nickname)
+                VALUES (%s, %s, %s)
+                """,
+                (user_id, model_id, f"My {model['model_name']}")
+            )
+            vehicle_id = cursor.lastrowid
+
+            # Every new car starts with the stock part in every category.
+            cursor.execute(
+                """
+                INSERT INTO vehicle_parts (vehicle_id, category_id, part_id)
+                SELECT %s, c.category_id, p.part_id
+                FROM categories c
+                JOIN parts p
+                    ON p.category_id = c.category_id
+                WHERE LOWER(p.part_name) LIKE 'stock %%'
+                  AND p.is_active = 1
+                """,
+                (vehicle_id,)
+            )
+
+            self.db.conn.commit()
+            self.db.conn.autocommit = True
+
+            self.selected_vehicle_id = int(vehicle_id)
+            self.user["money"] = current_money - price
+
+            QMessageBox.information(
+                self,
+                "Car Purchased",
+                f"{model['model_name']} was purchased successfully.\n\n"
+                f"Amount paid: {money(price)}\n"
+                "The car starts with stock parts and can now be customized separately."
+            )
+
+            self.load_cars()
+            # Keep the newly purchased vehicle selected by returning it immediately.
+            self.accept()
+
+        except Exception as exc:
+            try:
+                self.db.conn.rollback()
+                self.db.conn.autocommit = True
+            except Exception:
+                pass
+
+            QMessageBox.critical(
+                self,
+                "Car Purchase Error",
+                f"The car could not be purchased.\\n\\n{exc}"
+            )
+
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+
+# ============================================================
 # GARAGE WINDOW
 # ============================================================
 
@@ -4140,17 +4473,17 @@ class GarageWindow(QMainWindow):
             title
         )
 
-        vehicle_info = QLabel(
+        self.vehicle_info_label = QLabel(
             f"{self.current_vehicle['nickname']}  •  "
             f"{self.current_vehicle['model_name']}"
         )
 
-        vehicle_info.setStyleSheet(
+        self.vehicle_info_label.setStyleSheet(
             "color:#a9a1b5;font-size:14px;"
         )
 
         h.addWidget(
-            vehicle_info
+            self.vehicle_info_label
         )
 
         h.addStretch()
@@ -4214,6 +4547,36 @@ class GarageWindow(QMainWindow):
         h.addWidget(
             self.money_label
         )
+
+        cars_button = QPushButton(
+            "🚗  MY CARS / BUY"
+        )
+
+        cars_button.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+
+        cars_button.setMinimumHeight(38)
+
+        cars_button.clicked.connect(
+            self.open_vehicle_shop
+        )
+
+        cars_button.setStyleSheet(
+            """
+            QPushButton {
+                background:#211a2c;
+                color:#e9edf1;
+                border:1px solid #68517f;
+                border-radius:8px;
+                padding:8px 12px;
+                font-weight:bold;
+            }
+            QPushButton:hover { background:#414c57; }
+            """
+        )
+
+        h.addWidget(cars_button)
 
         switch_button = QPushButton(
             "⇄  SWITCH USER"
@@ -4728,6 +5091,77 @@ class GarageWindow(QMainWindow):
         )
 
     # ========================================================
+    # MY CARS / VEHICLE SHOP
+    # ========================================================
+
+    def open_vehicle_shop(self):
+
+        if not self.user.get("user_id"):
+            QMessageBox.information(
+                self,
+                "Guest Account",
+                "Guest accounts can preview the garage, but they cannot buy cars."
+            )
+            return
+
+        dialog = VehicleShopDialog(
+            self.db,
+            self.user,
+            self.current_vehicle.get("vehicle_id"),
+            self
+        )
+
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_vehicle_id:
+            self.switch_vehicle(dialog.selected_vehicle_id)
+
+    def switch_vehicle(self, vehicle_id):
+
+        vehicle = self.db.one(
+            """
+            SELECT
+                v.vehicle_id,
+                v.user_id,
+                v.nickname,
+                v.model_id,
+                cm.model_name,
+                cm.base_hp,
+                cm.base_weight,
+                cm.base_top_speed,
+                cm.base_acceleration
+            FROM vehicles v
+            JOIN car_models cm ON cm.model_id = v.model_id
+            WHERE v.vehicle_id = %s
+              AND v.user_id = %s
+            """,
+            (vehicle_id, self.user["user_id"])
+        )
+
+        if not vehicle:
+            QMessageBox.warning(
+                self,
+                "Vehicle Not Found",
+                "The selected vehicle could not be found."
+            )
+            return
+
+        self.current_vehicle = vehicle
+        self.load_installed_parts()
+        self.preview_parts = dict(self.installed_parts)
+        self.refresh_user_display()
+
+        self.vehicle_info_label.setText(
+            f"{self.current_vehicle['nickname']}  •  {self.current_vehicle['model_name']}"
+        )
+
+        self.select_first_category()
+        self.refresh_car_preview()
+
+        self.status_label.setText(
+            f"Switched to {self.current_vehicle['nickname']} "
+            f"({self.current_vehicle['model_name']})."
+        )
+
+    # ========================================================
     # SWITCH USER
     # ========================================================
 
@@ -5194,13 +5628,47 @@ class GarageWindow(QMainWindow):
             str(filename)
         )
 
-        path = os.path.join(
+        model_name = str(
+            self.current_vehicle.get("model_name", "")
+        )
+
+        model_folder = MODEL_ASSET_DIRS.get(model_name)
+
+        if model_folder:
+            model_dir = os.path.join(
+                ASSET_DIR,
+                model_folder
+            )
+
+            # 1. Normal filename, e.g.
+            #    supra/base.png or r34/base.png
+            candidates = [
+                os.path.join(model_dir, filename)
+            ]
+
+            # 2. Support the prefixed Supra files, e.g.
+            #    supra/supra_base.png
+            #    supra/supra_bbs_lm.png
+            if model_folder == "supra" and not filename.startswith("supra_"):
+                candidates.append(
+                    os.path.join(
+                        model_dir,
+                        "supra_" + filename
+                    )
+                )
+
+            for path in candidates:
+                if os.path.exists(path):
+                    return path
+
+        # Backward-compatible fallback for assets directly under assets/car/.
+        fallback_path = os.path.join(
             ASSET_DIR,
             filename
         )
 
-        if os.path.exists(path):
-            return path
+        if os.path.exists(fallback_path):
+            return fallback_path
 
         return None
 
@@ -5227,9 +5695,22 @@ class GarageWindow(QMainWindow):
 
     def base_pixmap(self):
 
-        return self.load_pixmap(
-            "base.png"
+        model_name = str(
+            self.current_vehicle.get("model_name", "")
         )
+
+        candidates = MODEL_ASSETS.get(
+            model_name,
+            []
+        )
+
+        for filename in candidates:
+            pixmap = self.load_pixmap(filename)
+            if pixmap is not None:
+                return pixmap
+
+        # Backward-compatible fallback for projects that only have base.png.
+        return self.load_pixmap("base.png")
 
     # ========================================================
     # PREVIEW
@@ -5249,8 +5730,8 @@ class GarageWindow(QMainWindow):
 
             self.car_label.setText(
                 "BASE CAR IMAGE NOT FOUND\n\n"
-                "Put base.png inside:\n"
-                "assets/car/"
+                "Put the car image inside:\n"
+                "assets/car/<car-folder>/"
             )
 
             return
