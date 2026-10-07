@@ -81,7 +81,56 @@ MODEL_ASSET_DIRS = {
 
 MODEL_ASSETS = {
     "Skyline GT-R R34": ["base.png"],
-    "Supra MK4": ["supra_base.png", "base.png"],
+    "Supra MK4": ["supra_jza80_base.png"],
+}
+
+# The database keeps generic sprite_file names because the same
+# parts table is shared by all car models. This map translates
+# those database names to the actual Supra files.
+SUPRA_SPRITE_MAP = {
+    "base.png": "supra_jza80_base.png",
+
+    # Wheels
+    "stock_wheels.png": "supra_a80_oem_17in_5spoke.png",
+    "bbs_lm.png": "supra_a80_bbs_lm.png",
+    "te37.png": "supra_a80_volk_te37.png",
+    "ce28.png": "supra_a80_volk_ce28n.png",
+    "hre.png": "supra_a80_hre_fitment.png",
+
+    # Spoilers
+    "stock_spoiler.png": "supra_a80_oem_highrise_wing.png",
+    "ducktail.png": "supra_a80_ducktail_lip.png",
+    "gt_wing.png": "supra_jza80_jun_gt_wing.png",
+    "carbon_gt_wing.png": "supra_jza80_topsecret_gforce_wing.png",
+    "time_attack_wing.png": "supra_jza80_veilside_ci_rear_wing.png",
+
+    # Bumpers
+    "stock_bumper.png": "supra_a80_oem_front_bumper.png",
+    "bull_bar.png": "supra_trd3000gt_front_bumper.png",
+    "nismo_bumper.png": "supra_jza80_topsecret_type2_front_bumper.png",
+    "rocket_bunny_bumper.png": "supra_jza80_veilside_cii_front_bumper.png",
+    "varis_bumper.png": "supra_jza80_varis_solid_joker_front_bumper.png",
+
+    # Paint
+    "racing_red.png": "supra_a80_renaissance_red_3l2.png",
+    "midnight_purple.png": "supra_a80_royal_sapphire_pearl_8l5.png",
+    "bayside_blue.png": "supra_a80_baltic_blue_752.png",
+    "matte_black.png": "supra_a80_black_202.png",
+
+    # Engines
+    "engine_stock.png": "supra_jza80_2jzgte_stock.png",
+    "turbo.png": "supra_jza80_hks_gt3_turbo.png",
+    "stage1.png": "supra_jza80_titan_35l_2jzgte.png",
+    "stage2.png": "supra_jza80_greddy_t88_2jzgte.png",
+    "racing_engine.png": "supra_jza80_precision_2jzgte_race.png",
+}
+
+SUPRA_CATEGORY_ORDER = {
+    4: 1,  # Paint
+    5: 2,  # Engine
+    3: 3,  # Bumper
+    2: 4,  # Spoiler
+    1: 5,  # Wheels
 }
 
 
@@ -5616,6 +5665,40 @@ class GarageWindow(QMainWindow):
     # ASSETS
     # ========================================================
 
+    def current_model_name(self):
+        return str(
+            self.current_vehicle.get("model_name", "")
+        )
+
+    def current_asset_dir(self):
+        model_folder = MODEL_ASSET_DIRS.get(
+            self.current_model_name()
+        )
+
+        if not model_folder:
+            return None
+
+        return os.path.join(
+            ASSET_DIR,
+            model_folder
+        )
+
+    def resolve_sprite_filename(self, filename):
+        if not filename:
+            return None
+
+        filename = os.path.basename(
+            str(filename)
+        )
+
+        if self.current_model_name() == "Supra MK4":
+            return SUPRA_SPRITE_MAP.get(
+                filename,
+                filename
+            )
+
+        return filename
+
     def find_asset(
         self,
         filename
@@ -5624,47 +5707,34 @@ class GarageWindow(QMainWindow):
         if not filename:
             return None
 
-        filename = os.path.basename(
-            str(filename)
+        resolved_filename = self.resolve_sprite_filename(
+            filename
         )
 
-        model_name = str(
-            self.current_vehicle.get("model_name", "")
-        )
+        if not resolved_filename:
+            return None
 
-        model_folder = MODEL_ASSET_DIRS.get(model_name)
+        model_dir = self.current_asset_dir()
 
-        if model_folder:
-            model_dir = os.path.join(
-                ASSET_DIR,
-                model_folder
+        if model_dir:
+            model_path = os.path.join(
+                model_dir,
+                resolved_filename
             )
 
-            # 1. Normal filename, e.g.
-            #    supra/base.png or r34/base.png
-            candidates = [
-                os.path.join(model_dir, filename)
-            ]
+            if os.path.exists(model_path):
+                return model_path
 
-            # 2. Support the prefixed Supra files, e.g.
-            #    supra/supra_base.png
-            #    supra/supra_bbs_lm.png
-            if model_folder == "supra" and not filename.startswith("supra_"):
-                candidates.append(
-                    os.path.join(
-                        model_dir,
-                        "supra_" + filename
-                    )
-                )
+        # Never fall back to assets/car/ for the Supra.
+        # This prevents R34 files with generic names from being
+        # loaded into the Supra preview.
+        if self.current_model_name() == "Supra MK4":
+            return None
 
-            for path in candidates:
-                if os.path.exists(path):
-                    return path
-
-        # Backward-compatible fallback for assets directly under assets/car/.
+        # R34 keeps backward compatibility with the old layout.
         fallback_path = os.path.join(
             ASSET_DIR,
-            filename
+            resolved_filename
         )
 
         if os.path.exists(fallback_path):
@@ -5695,12 +5765,8 @@ class GarageWindow(QMainWindow):
 
     def base_pixmap(self):
 
-        model_name = str(
-            self.current_vehicle.get("model_name", "")
-        )
-
         candidates = MODEL_ASSETS.get(
-            model_name,
+            self.current_model_name(),
             []
         )
 
@@ -5709,8 +5775,7 @@ class GarageWindow(QMainWindow):
             if pixmap is not None:
                 return pixmap
 
-        # Backward-compatible fallback for projects that only have base.png.
-        return self.load_pixmap("base.png")
+        return None
 
     # ========================================================
     # PREVIEW
@@ -5758,22 +5823,38 @@ class GarageWindow(QMainWindow):
             self.preview_parts.values()
         )
 
-        parts.sort(
-            key=lambda p: (
-                int(
-                    p.get(
-                        "layer_order",
-                        1
-                    ) or 1
-                ),
-                int(
-                    p.get(
-                        "part_id",
-                        0
-                    ) or 0
+        if self.current_model_name() == "Supra MK4":
+            parts.sort(
+                key=lambda p: (
+                    SUPRA_CATEGORY_ORDER.get(
+                        int(p.get("category_id", 0) or 0),
+                        99
+                    ),
+                    int(
+                        p.get(
+                            "part_id",
+                            0
+                        ) or 0
+                    )
                 )
             )
-        )
+        else:
+            parts.sort(
+                key=lambda p: (
+                    int(
+                        p.get(
+                            "layer_order",
+                            1
+                        ) or 1
+                    ),
+                    int(
+                        p.get(
+                            "part_id",
+                            0
+                        ) or 0
+                    )
+                )
+            )
 
         for part in parts:
 
